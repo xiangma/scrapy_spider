@@ -1,0 +1,358 @@
+# -*- coding: utf-8 -*-
+import scrapy
+from scrapy import Request
+from maijiajob.items import JobItem
+from scrapy.selector import Selector
+from scrapy import log
+import re
+from scrapy.xlib.pydispatch import dispatcher
+from scrapy import signals
+import os
+from urllib import unquote
+
+def pick_xpath(sel, path):
+    value = sel.xpath(path).extract()
+    if value and value[0].strip():
+        return value[0].strip()
+    return ''
+
+def pick_xpaths(sel, path,letter=','):
+    value = sel.xpath(path).extract()
+    if value :
+        return letter.join(value).strip()
+    return ''
+
+job_type_dict = {
+    1 : u'兼职',
+    2 : u'实习',
+    3 : u'全职',
+
+    }
+
+class Job58Spider(scrapy.Spider):
+    name = "job58"
+    download_delay = 1
+    # 城市列表
+    start_urls = (
+        'http://www.58.com/zptaobao/changecity/',
+    )
+    
+    domain_matcher = r'(http://.*\.com).*'
+    date_matcher = r'[0-9]{2}-[0-9]{2}'
+    name_matcher = re.compile(r"linkman:'(.{,15})'")
+  
+    def __init__(self, para=None, *args, **kwargs):
+        super(Job58Spider, self).__init__(*args, **kwargs)
+        dispatcher.connect(self.stats_spider_closed, signal=signals.stats_spider_closed)
+        dispatcher.connect(self.engine_opened, signal=signals.engine_started) 
+        self.para = para
+
+    def engine_opened(self):
+        log.msg('para:' + str(self.para))
+
+    def stats_spider_closed(self, spider, spider_stats):
+        feed_uri = self.settings.get("FEED_URI")
+        if feed_uri:
+            cmd = "xz -c %s > %s.xz" % (feed_uri, feed_uri)
+            ret = os.system(cmd)
+            if ret == 0:
+                log.msg("compress %s successfully!" % feed_uri)
+            else:
+                log.msg("compress %s failed" % feed_uri)
+        # these statistics will be committed to master and then load to mysql
+        # start_time,finish_time,item_count,request_count,response_count,exception_count,status_302_count,log_error_count
+        stat = 'STAT%s,%s,%s,%s,%s,%s,%s,%s' % (
+            spider_stats['start_time'].isoformat(' ')[0:19],
+            spider_stats['finish_time'].isoformat(' ')[0:19],
+            spider_stats['item_scraped_count'] if 'item_scraped_count' in spider_stats else 0,
+            spider_stats['downloader/request_count'] if 'downloader/request_count' in spider_stats else 0,
+            spider_stats['downloader/response_count'] if 'downloader/response_count' in spider_stats else 0,
+            spider_stats['downloader/exception_count'] if 'downloader/exception_count' in spider_stats else 0,
+            spider_stats['downloader/response_status_count/302'] if 'downloader/response_status_count/302' in spider_stats else 0,
+            spider_stats['log_count/ERROR'] if 'log_count/ERROR' in spider_stats else 0)
+        print stat # print to slave process
+
+    def parse(self, response):
+        # 判断是否有参数
+        if self.para:
+            citys = self.para.split(',')
+            for city in citys:
+                city_code = city.split(':')[0]
+                city_name = city.split(':')[1]
+                if city_name.startswith('%'):
+                    city_name = unquote(city_name)
+                url = 'http://' + city_code + '.58.com/zptaobao/'
+                yield Request(url=url, meta={"city": city_name,'city_code':city_code}, callback=self.parse_category) 
+        else:
+            for selector in response.xpath('//dl[@id="clist"]/dd/a'):
+                url = selector.xpath('@href').extract()[0]
+                city_name = selector.xpath('text()').extract()[0]
+                yield Request(url=url, meta={"city": city_name}, callback=self.parse_category)
+
+    def parse_category(self, response):
+        """
+         抓取八大类目职位信息： 淘宝客服， 淘宝美工， 店铺推广， 网店店长 , 文案编辑 ， 活动策划 ， 仓库管理 ，快递员
+         job_type = 类型 1 2 3  兼职 实习 全职
+        """
+        city = response.meta["city"]
+        city_code = response.meta['city_code']
+        # 检查是否被ban
+        if '/support.58.com/firewall' in response.url:
+            log.msg("Oops, banned !")
+            return
+
+        taobaokefu = response.xpath('//ul[@class="seljobCate"]/li/a[contains(@href, "taobaokefu")]/@href').extract()[0]
+        category = response.xpath('//ul[@class="seljobCate"]/li/a[contains(@href, "taobaokefu")]/text()').extract()
+        yield Request(url=taobaokefu, meta={"category": category, "city": city}, callback=self.parse_job_list)
+        dianzhang = response.xpath('//ul[@class="seljobCate"]/li/a[contains(@href, "taobaodianzhang")]/@href').extract()[0]
+        category = response.xpath('//ul[@class="seljobCate"]/li/a[contains(@href, "taobaodianzhang")]/text()').extract()
+        yield Request(url=dianzhang, meta={"category": category, "city": city}, callback=self.parse_job_list)
+        meigong = response.xpath('//ul[@class="seljobCate"]/li/a[contains(@href, "taobaomeigong")]/@href').extract()[0]
+        category = response.xpath('//ul[@class="seljobCate"]/li/a[contains(@href, "taobaomeigong")]/text()').extract()
+        yield Request(url=meigong, meta={"category": category, "city": city}, callback=self.parse_job_list)
+        tuiguang = response.xpath('//ul[@class="seljobCate"]/li/a[contains(@href, "taobaotuiguang")]/@href').extract()[0]
+        category = response.xpath('//ul[@class="seljobCate"]/li/a[contains(@href, "taobaotuiguang")]/text()').extract()
+        yield Request(url=tuiguang, meta={"category": category, "city": city}, callback=self.parse_job_list)
+        
+        wenanbianji = 'http://'+city_code+'.58.com/zptaobaobianji/?PGTID=14334898443900.5265174044761807&ClickID=1'
+        category = u'文案编辑'
+        yield Request(url=wenanbianji, meta={"category": category, "city": city}, callback=self.parse_job_list)
+        
+        huodongcehua = 'http://'+city_code+'.58.com/zptaobaocehua/?PGTID=14334900636710.09247982525266707&ClickID=1'
+        category = u'活动策划'
+        yield Request(url=huodongcehua, meta={"category": category, "city": city}, callback=self.parse_job_list)
+        
+        cangkuguanli = 'http://'+city_code+'.58.com/zpwuliucangchu/?key=%E4%BB%93%E5%BA%93%E7%AE%A1%E7%90%86&cmcskey=%E4%BB%93%E5%BA%93%E7%AE%A1%E7%90%86&final=1&jump=2&specialtype=gls&canclequery=isbiz%3D0&sourcetype=4'
+        category = u'仓库管理'
+        yield Request(url=cangkuguanli, meta={"category": category, "city": city}, callback=self.parse_job_list)
+        
+        kuaidiyuan = 'http://'+city_code+'.58.com/job/?key=%E5%BF%AB%E9%80%92%E5%91%98&cmcskey=%E5%BF%AB%E9%80%92%E5%91%98&final=1&jump=2&specialtype=gls&canclequery=isbiz%3D0&sourcetype=4'
+        category = u'快递员'
+        yield Request(url=kuaidiyuan, meta={"category": category, "city": city}, callback=self.parse_job_list)
+        
+        category = u'摄影师'
+        job_type = 3
+        url = 'http://'+city_code+'.58.com/job/?key=%E6%91%84%E5%BD%B1%E5%B8%88&sourcetype=1_4&PGTID=147353264189439431924830855&ClickID=1'
+        yield Request(url=url,meta={"category": category, "city": city,'job_type':job_type},callback=self.parse_job_list)
+
+        category = u'平面模特'
+        job_type = 3
+        url = 'http://'+city_code+'.58.com/job/?key=%E5%B9%B3%E9%9D%A2%E6%A8%A1%E7%89%B9&cmcskey=%E5%B9%B3%E9%9D%A2%E6%A8%A1%E7%89%B9&final=1&jump=2&specialtype=gls&pgtid=147353264189439431924830855&clickid=1&canclequery=isbiz%3D0&sourcetype=1_4'
+        yield Request(url=url,meta={"category": category, "city": city,'job_type':job_type},callback=self.parse_job_list)
+
+
+        ###--------------------------------------------兼职  filter=free&
+        category = u'活动策划'
+        job_type = 1
+        url = 'http://'+city_code+'.58.com/event/?PGTID=14447886322250.5926351698581129&ClickID=1'
+        yield Request(url,meta={"category": category, "city": city,'job_type':job_type} ,callback=self.parse_job_list)
+        category = u'网络营销'
+        job_type = 1
+        url = 'http://'+city_code+'.58.com/wangluoyingxiao/?PGTID=135679506189371356626915410&ClickID=1'
+        yield Request(url,meta={"category": category, "city": city,'job_type':job_type} ,callback=self.parse_job_list)
+        category = u'SEO优化'
+        job_type = 1
+        url = 'http://'+city_code+'.58.com/partimeseo/?PGTID=152025317189371357186889848&ClickID=1'
+        yield Request(url,meta={"category": category, "city": city,'job_type':job_type} ,callback=self.parse_job_list)
+        category = u'美工设计'
+        job_type = 1
+        url = 'http://'+city_code+'.58.com/computer/?PGTID=144435722189371389986264904&ClickID=1'
+        yield Request(url,meta={"category": category, "city": city,'job_type':job_type} ,callback=self.parse_job_list)
+        category = u'图片处理'
+        job_type = 1
+        url = 'http://'+city_code+'.58.com/imageps/?PGTID=171439643189371400305490092&ClickID=1'
+        yield Request(url,meta={"category": category, "city": city,'job_type':job_type} ,callback=self.parse_job_list)
+        category = u'礼仪模特'
+        job_type = 1
+        url = 'http://'+city_code+'.58.com/liyiyanyi/?PGTID=198039147189371407914588601&ClickID=1'
+        yield Request(url,meta={"category": category, "city": city,'job_type':job_type} ,callback=self.parse_job_list)
+        category = u'客服'
+        job_type = 1
+        url = 'http://'+city_code+'.58.com/jianzhi/?key=%E5%AE%A2%E6%9C%8D&cmcskey=%E5%AE%A2%E6%9C%8D&final=1&jump=2&specialtype=gls&canclequery=isbiz%3D0&sourcetype=4'
+        yield Request(url,meta={"category": category, "city": city,'job_type':job_type} ,callback=self.parse_job_list)
+        category = u'美工'
+        job_type = 1
+        url = 'http://'+city_code+'.58.com/computer/?key=%E7%BE%8E%E5%B7%A5&cmcskey=%E7%BE%8E%E5%B7%A5&final=1&jump=2&specialtype=gls&canclequery=isbiz%3D0&sourcetype=4'
+        yield Request(url,meta={"category": category, "city": city,'job_type':job_type} ,callback=self.parse_job_list)
+        category = u'运营'
+        job_type = 1
+        url = 'http://'+city_code+'.58.com/jianzhi/?key=%E8%BF%90%E8%90%A5&cmcskey=%E8%BF%90%E8%90%A5&final=1&jump=2&specialtype=gls&canclequery=isbiz%3D0&sourcetype=4'
+        yield Request(url,meta={"category": category, "city": city,'job_type':job_type} ,callback=self.parse_job_list)
+        category = u'推广'
+        job_type = 1
+        url ='http://'+city_code+'.58.com/jianzhi/?key=%E6%8E%A8%E5%B9%BF&cmcskey=%E6%8E%A8%E5%B9%BF&final=1&jump=2&specialtype=gls&canclequery=isbiz%3D0&sourcetype=4'
+        yield Request(url,meta={"category": category, "city": city,'job_type':job_type} ,callback=self.parse_job_list)
+        category = u'摄影师'
+        job_type = 1
+        url ='http://'+city_code+'.58.com/jianzhi/?key=%E6%91%84%E5%BD%B1%E5%B8%88&cmcskey=%E6%91%84%E5%BD%B1%E5%B8%88&final=1&jump=2&specialtype=gls&canclequery=isbiz%3D0&sourcetype=4'
+        yield Request(url,meta={"category": category, "city": city,'job_type':job_type} ,callback=self.parse_job_list)
+
+        #测试-------
+        #url= 'http://hz.58.com/zpwuliucangchu/23642787070089x.shtml'
+        #yield Request(url,meta={"category": u'客服', "city": city,'job_type':1} ,callback=self.parse_job_detail)
+
+    def parse_job_list(self, response):
+        if  'job_type' in response.meta:
+            job_type = response.meta['job_type']
+        else:
+            job_type = 3 #默认为全职
+        city = response.meta["city"]
+        category = response.meta["category"]
+        job_list = response.xpath('//*[@id="infolist"]/dl')  # 职位列表
+        log.msg('category: '+str(category)+" "+response.url)
+        if len(job_list) > 0:
+            for selector in job_list:
+                refresh_date = selector.xpath('dd/text()')[-1].extract().strip()  # 更新时间
+                date = re.findall(self.date_matcher, refresh_date)  
+                if date or u'天前' in refresh_date:
+                    log.msg('stop crawl, refresh date:' + date[0])
+                    return
+                else:
+                    tmp = selector.xpath('dt/a/@href').extract()
+                    if tmp:
+                        url = selector.xpath('dt/a/@href').extract()[0]
+                        if 1 == job_type:
+                            yield Request(url=url, meta={"category": category, "city": city,'job_type':job_type}, callback=self.parse_job_jianzhi_detail)
+                        else:
+                            yield Request(url=url, meta={"category": category, "city": city,'job_type':job_type}, callback=self.parse_job_detail)
+
+            # 分页
+            next_page = response.xpath('//div[@class="pager"]/a[@class="next"]/@href').extract()  # 判断下一页链接是否存在
+            refresh_date = job_list[-1].xpath('dd/text()')[-1].extract().strip()  # 更新时间
+            log.msg('refresh_date:' + refresh_date)
+            if next_page and refresh_date:
+                date = re.findall(self.date_matcher, refresh_date)
+                if date or u'天前' in refresh_date:  # 如果以日期格式显示，说明已经不是最新的，不再继续抓取
+                    log.msg("stop crawl, refresh date:" + date[0])
+                    return
+                else:
+                    domain = re.findall(self.domain_matcher, response.url)[0]
+                    url = domain + next_page[0]
+                    log.msg("nextpage:" + next_page[0])
+                    yield Request(url=url, meta={'city': city, 'category': category,'job_type':job_type}, callback=self.parse_job_list)
+
+
+
+    def parse_job_detail(self, response):
+        
+        item = JobItem()
+        item['prop'] = job_type_dict.get(response.meta["job_type"],u'全职')
+        item["city"] = response.meta["city"]
+        item["category"] = response.meta["category"]
+        item["url"] = response.url
+        item["name"] = response.xpath('//div[@class="headConLeft"]/h1/text()').extract()
+        item["address"] = response.xpath('//div[@class="xq"]/ul/li[3]/span[2]/text()').extract()
+        item["salary"] = response.xpath('//div[@class="xq"]/ul/li[1]/div[1]/span[2]/strong/text()').extract()
+        item["experience"] = response.xpath('//div[@class="xq"]/ul/li[2]/div[2]/text()').extract()
+        item["education"] = response.xpath('//div[@class="xq"]/ul/li[1]/div[2]/text()').extract()
+        welfarelabels = response.xpath('//*[@id="infoview"]/ul[@class="cbright"]/li/div/span/text()').extract()
+        item["welfarelabel"] = ",".join(map(lambda x: x.strip(), welfarelabels))
+        refresh_number = response.xpath('//ul[@class="headTag"]/li[1]/span/strong/text()').extract()
+        refresh_unit = response.xpath('//ul[@class="headTag"]/li[1]/span/text()').extract()
+        item["publish"] = refresh_number[0].strip() + refresh_unit[1].strip() if refresh_unit else ''
+
+        contact_code = response.xpath('//input[@id="pagenum"]/@value').extract()
+        if contact_code and contact_code[0].strip():
+            contact_code[0] = contact_code[0].strip()
+            item["contact"] = 'http://image.58.com/showphone.aspx?t=v55&v=' + contact_code[0].split('_')[0]  # 如果有两个电话用下划线分割，我们只去第一个
+        else:
+            log.msg('quanzhi_ no contact found: ' + response.url)
+            return
+        item["contact_name"] = self.name_matcher.findall(response.body)
+        # http://image.58.com/showphone.aspx?t=v55&v=F58D0054214E9FE70ECBCE1BEA839C2F6
+        # http://image.58.com/showphone.aspx?t=v55&v=6E71DF44A6E3245B04E6E3AE268573395
+        # desc = response.xpath('//div[@id="zhiwei"]/div[@class="posMsg borb"]/p/span/text()').extract()
+        # item["desc"] = "\n".join(filter(lambda x: x, map(lambda x: x.strip(), desc)))
+        item["desc"] = response.xpath('//div[@id="zhiwei"]/div[@class="posMsg borb"]').extract()
+        item["company"] = response.xpath('//a[@class="companyName"]/text() | //div[@class="compTitle"]/a/text()').extract()
+        item["industry"] = response.xpath('//div[@class="compMsg clearfix"]/ul/li[1]/a/text()').extract()
+        item["scale"] = response.xpath('//div[@class="compMsg clearfix"]/ul/li[@class="scale"]/text()').extract()
+        item["comprop"] = response.xpath('//div[@class="compMsg clearfix"]/ul/li[2]/text()').extract()
+        comprofile = response.xpath('//div[@id="gongsi"]/p[1]/text()').extract()    # 公司介绍，先尝试抓取P里面的文字，如果没有，则抓取p/span中的文字
+        comprofile = filter(lambda x: x, map(lambda x: x.strip(), comprofile))
+        if not comprofile:
+            comprofile = response.xpath('//div[@id="gongsi"]/p[1]/span/text()').extract()
+            comprofile = filter(lambda x: x, map(lambda x: x.strip(), comprofile))
+        item["comprofile"] = '\n'.join(comprofile)
+        item['shopaddr'] = '' 
+        shop_detail = response.xpath('//div[@class="companyCon mod detailRightAd"]/a/@href').extract()
+        if shop_detail:
+            yield Request(shop_detail[0],meta={'item':item},callback=self.parse_shop_url)
+
+        else:
+            log.msg('ERROR:No found shop url!')
+            item['shopurl'] = ''
+            yield item
+
+    def parse_shop_url(self,response):
+        item = response.meta['item']
+        tmp = u'网址'
+        shopurl = response.xpath('//div[@class="basicMsg"]/table//th[contains(text(),"%s")]/following-sibling::*[1]//a/@href'%tmp).extract()
+        #log.msg('@#'*30+str(shopurl))
+        if shopurl and u'.58.com'not in shopurl[0] :
+            item['shopurl'] = shopurl[0].strip()
+        else:
+            item['shopurl'] = ''
+
+        if 'job_type' in response.meta and 1 == response.meta['job_type']:
+            tmp = u'性质'
+            comprop = response.xpath('//div[@class="basicMsg"]/table//th[contains(text(),"%s")]/following-sibling::*[1]/text()'%tmp).extract()
+            item["comprop"] = comprop[0].strip() if comprop else ''
+
+            tmp = u'规模'
+            scale = response.xpath('//div[@class="basicMsg"]/table//th[contains(text(),"%s")]/following-sibling::*[1]/text()'%tmp).extract()
+            item["scale"] = scale[0].strip() if scale else ''
+
+            #if scale:
+            #    item["scale"] = scale[0].strip()
+            
+            tmp = u'行业'
+            industry = response.xpath('//div[@class="basicMsg"]/table//th[contains(text(),"%s")]/following-sibling::*[1]/span/a/text()'%tmp).extract()
+            item["industry"] = ' '.join(industry) if industry else ''
+
+            item['shopaddr'] = pick_xpath(response,'//td[@class="adress"]/span/text()')
+        
+        yield item
+
+        ####所有extract结果都在pipeline内部进行取0位元素操作
+
+    def  parse_job_jianzhi_detail(self,response):
+        item = JobItem()
+        sel = Selector(response)
+        item['prop'] = job_type_dict.get(response.meta["job_type"],u'全职')
+        item["city"] = response.meta["city"]
+        item["category"] = response.meta["category"]
+        item["url"] = response.url
+        item["name"] = pick_xpath(sel,'//*[@id="main"]/div[@class="leftbar pad60"]/h1/text()')
+
+        item["address"] = pick_xpaths(sel,'//div[@class="xq"]//dl[last()]/dd/a/text()','，')
+        item["salary"] = pick_xpath(sel,'//div[@class="xq"]//dl[4]/dd/text()').replace('\n','')
+        item["experience"] = ''
+        item["education"] = ''
+        item["welfarelabel"] = ''
+        item["publish"] = pick_xpath(sel,'//*[@id="main"]//span[@class="timeD"]/text()')
+
+        contact_code = pick_xpath(sel,'//input[@id="pagenum"]/@value')
+        if contact_code :
+            item["contact"] = 'http://image.58.com/showphone.aspx?t=v55&v=' + contact_code[0].split('_')[0]  # 如果有两个电话用下划线分割，我们只去第一个
+        else:
+            log.msg('jianzhi_ no contact found: ' + response.url)
+            return
+        item["contact_name"] = self.name_matcher.findall(response.body)
+
+        item["desc"] = pick_xpaths(sel,'//*[@id="zhiwei"]/dl/dd//span/text()','\n')+ '\n' + item["salary"]
+        item["salary"] = u'面议'
+        item['company'] = pick_xpath(sel,'//*[@class="xq"]//div[@class="compMsg"]/a[1]/text()')
+        shop_detail = pick_xpath(sel,'//*[@class="xq"]//div[@class="compMsg"]/a[1]/@href')
+
+        item["industry"] = ''
+        item["scale"] = ''
+        item["comprop"] = ''
+        item["comprofile"] = pick_xpaths(sel,'//div[@id="gongsi"]/p[1]/text()','\n')   # 公司介绍，先尝试抓取P里面的文字，如果没有，则抓取p/span中的文字
+        item['shopaddr'] = ''
+        if shop_detail:
+            yield Request(shop_detail,meta={'item':item,'job_type':response.meta["job_type"]},callback=self.parse_shop_url)
+        else:
+            log.msg('ERROR:No found shop url!')
+            item['shopurl'] = ''
+            yield item
