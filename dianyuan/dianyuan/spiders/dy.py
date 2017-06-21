@@ -17,8 +17,10 @@ class DySpider(scrapy.Spider):
              item['uptime'] = movies[k].xpath('./td[3]/p[2]/span/text()').extract()[0]
              item['city'] = movies[k].xpath('./td[4]/text()').extract()[0]
              urlst = movies[k].xpath('./td[@class="l cpy"]/h3/a/@href').extract()[0]
-             yield Request (url=urlst, meta={'item': item}, callback = self.parse_sickinfo)
-    def parse_sickinfo(self,response):
+             print(urlst)
+             yield Request(url=urlst, meta={'item': item}, callback = self.parse_sickinfo,)
+    def parse_sickinfo(self, response):
+        print("----------------")
         trs = response.xpath('//div[@class="cpyContact mCommStyle"]/table/tr')
         item = response.meta['item']
         item['name'] = trs[0].xpath('./td[1]/text()').extract()[0]
@@ -26,4 +28,6 @@ class DySpider(scrapy.Spider):
         item['mailbox'] = trs[2].xpath('./td[1]/a/text()').extract()[0]
         item['Mphone'] = trs[4].xpath('./td/text()').extract()[0]
         item['Clink'] = trs[6].xpath('./td[1]/a/text()').extract()[0]
+        print("----------------")
+        print(item['name'])
         yield item

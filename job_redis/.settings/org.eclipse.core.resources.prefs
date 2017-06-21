@@ -1,0 +1,11 @@
+eclipse.preferences.version=1
+encoding//maijiajob/items.py=utf-8
+encoding//maijiajob/pipelines.py=utf-8
+encoding//maijiajob/settings.py=utf-8
+encoding//maijiajob/spiders/job58.py=utf-8
+encoding//maijiajob/spiders/jobganji.py=utf-8
+encoding//maijiajob/spiders/joblagou.py=utf-8
+encoding//maijiajob/spiders/resume58.py=utf-8
+encoding//maijiajob/spiders/resumeganji.py=utf-8
+encoding//maijiajob/spiders/resumegou.py=utf-8
+encoding//maijiajob/spiders/taojob.py=utf-8
